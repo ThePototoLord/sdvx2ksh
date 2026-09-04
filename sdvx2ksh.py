@@ -7,7 +7,6 @@ from urllib.error import HTTPError
 import numpy as np
 import lxml.html
 from io import BytesIO
-import pafy
 from PIL import Image
 import os
 import codecs
@@ -246,17 +245,7 @@ class Score:
 		self.url['nofx'] = nofx.xpath(".//a")[0].attrib['href']
 
 	def dl_music(self):
-		def dl(url, filename):
-			video = pafy.new(url)
-			best = video.getbestaudio()
-			nonwave_filename = filename + '.' + best.extension
-			wave_filename = filename + '.wav'
-			print('youtubeから' + best.title + 'をダウンロードしています')
-			best.download(nonwave_filename)
-			print(nonwave_filename + "の保存に成功しました")
-			sound = AudioSegment.from_file(nonwave_filename)
-			print(best.title + 'のwavファイルを生成しています')
-			sound.export(wave_filename, format='wav')
+		print('音源のダウンロードは現在サポートしていません')
 
 		if 'fx' not in self.url or 'nofx' not in self.url:
 			self.setYoutubeUrl()
