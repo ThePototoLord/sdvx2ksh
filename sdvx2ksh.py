@@ -1,13 +1,11 @@
-#!/ndow-option -g utf8 onusr/bin/env python
+#!/usr/bin/env python3
 # coding:utf-8
-from __future__ import unicode_literals
 import sys
-import urllib2
-from urllib2 import HTTPError
+import urllib.request
+from urllib.error import HTTPError
 import numpy as np
-from selenium import webdriver
 import lxml.html
-from cStringIO import StringIO
+from io import BytesIO
 import pafy
 from PIL import Image
 import os
@@ -45,7 +43,7 @@ def color_picker(arr):
 	dic = {c:str(colors.count(c)) for c in set(colors)}
 	for k in sorted(dic.items(), key=lambda x:int(x[1]), reverse=True):
 		c = rgba2hex([int(i) for i in k[0][1:-1].split()])
-		print k[0] + ' : ' + c + ' : ' + str(k[1])
+		print(k[0] + ' : ' + c + ' : ' + str(k[1]))
 
 ###雑記
 '''
@@ -73,57 +71,42 @@ class Score:
 		self.url = {}
 		self.header = {}
 
-		# https://sdvx.in/05/05004m.htm
-		# http://sdvx.in/05/05004m.htm
-		#
-		# /05/05004m.htm
-		#   version = 05
-		#   id = 05004
-		#   difficulty = m
-		#
-		# Also support the old format:
-		# /03/03044/03044e.htm
+		old_url = re.match(
+			r'^https?://(?:www\.)?sdvx\.in/(\d+)/(\d+)/(\d+)([naeigm])\.htm(?:\?.*)?$',
+			url,
+			re.I
+		)
 
-		m = re.match(
+		new_url = re.match(
 			r'^https?://(?:www\.)?sdvx\.in/(\d+)/(\d+)([naeigm])\.htm(?:\?.*)?$',
 			url,
 			re.I
 		)
 
-		if m:
-			self.version = m.group(1)
-			self.id = m.group(2)
-			self._d = m.group(3).lower()
+		if old_url:
+			self.version = old_url.group(1)
+			self.id = old_url.group(3)
+			self._d = old_url.group(4).lower()
 			self.path = '/'.join(url.split('/')[:4]) + '/'
+
+		elif new_url:
+			self.version = new_url.group(1)
+			self.id = new_url.group(2)
+			self._d = new_url.group(3).lower()
+			self.path = '/'.join(url.split('/')[:4]) + '/'
+
 		else:
-			m = re.match(
-				r'^https?://(?:www\.)?sdvx\.in/(\d+)/(\d+)/(\d+)([naeigm])\.htm(?:\?.*)?$',
-				url,
-				re.I
-			)
-
-			if not m:
-				raise ValueError('sdvx.inのurlが不正です: ' + url)
-
-			self.version = m.group(1)
-			self.id = m.group(3)
-			self._d = m.group(4).lower()
-			self.path = '/'.join(url.split('/')[:4]) + '/'
+			raise ValueError('sdvx.inのurlが不正です: ' + url)
 
 		self.difficulty = {'n':'NOVICE',   'a':'ADVANCED', 'e':'EXHAUST',
 		              'i':'INFINITE', 'g':'GRAVITY', 'm':'MAXIMUM'}[self._d]
+
 		self.url['url']    = url
 
-		if self.path.endswith('/' + self.id + '/'):
-			self.url['bg']     = self.path + self.id + 'bg.png'
-			self.url['bar']    = self.path + self.id + 'bar.png'
-			self.url['jacket'] = self.path + self.id + self._d + '.jpg'
-			self.url['data']   = self.path + 'obj/data' + self.id + self._d + '.png'
-		else:
-			self.url['bg']     = self.path + self.id + '/' + self.id + 'bg.png'
-			self.url['bar']    = self.path + self.id + '/' + self.id + 'bar.png'
-			self.url['jacket'] = self.path + self.id + '/' + self.id + self._d + '.jpg'
-			self.url['data']   = self.path + 'obj/data' + self.id + self._d + '.png'
+		self.url['bg']     = self.path + self.id + '/' + self.id + 'bg.png'
+		self.url['bar']    = self.path + self.id + '/' + self.id + 'bar.png'
+		self.url['jacket'] = self.path + self.id + '/' + self.id + self._d + '.jpg'
+		self.url['data']   = self.path + 'obj/data' + self.id + self._d + '.png'
 
 	def setHeader(self):
 #		def ancestor(self,i):
@@ -140,14 +123,14 @@ class Score:
 #		element_searched = root.xpath('//div[text()="Effected by"]')[0]
 #		element_effect = ancestor(element_searched, 5).getnext().xpath('.//div')[0]
 		element_effect = elements_div[-2]
-		effect = element_effect.text
+		effect = element_effect.text or ''
 		illust = element_effect.text_content()[len(effect):]
 		self.header['effect'] = effect
 		self.header['illustrator'] = illust
-		self.header['level'] = elements_div[3].text
-		self.header['title'] = elements_div[4].text
-		self.header['artist'] = elements_div[-9].text[3:]
-		bpm = elements_div[-5].text
+		self.header['level'] = elements_div[3].text or ''
+		self.header['title'] = elements_div[4].text or ''
+		self.header['artist'] = (elements_div[-9].text or '')[3:]
+		bpm = elements_div[-5].text or ''
 		self.header['t'] = '' if '-' in bpm else bpm
 		self.header['difficulty'] = {'n':'light', 'a':'challenge', 'e':'extended',
 		                             'i':'infinite', 'g':'infinite', 'm':'maximum'}[self._d]
@@ -165,63 +148,54 @@ class Score:
 
 		png = root.xpath('//p[@class="PNG"]')
 
+		def correct_url(url):
+			if url.startswith('//'):
+				return 'https:' + url
+			elif url.startswith('/'):
+				return 'https://sdvx.in' + url
+			elif url.startswith('http://') or url.startswith('https://'):
+				return url
+			return urllib.parse.urljoin(self.url['url'], url)
+
 		if len(png) >= 3:
 			bg, data, bar = [
 				e.xpath('img')[0].attrib['src']
 				for e in png[:3]
 			]
-
-			def correct_url(url):
-				if url.startswith('//'):
-					return 'https:' + url
-				elif url.startswith('/'):
-					return 'http://sdvx.in' + url
-				elif url.startswith('http://') or url.startswith('https://'):
-					return url
-				else:
-					return self.path + url
-
 			self.url['bg'] = correct_url(bg)
 			self.url['data'] = correct_url(data)
 			self.url['bar'] = correct_url(bar)
 			return
 
 		images = root.xpath('//img')
-
 		png_images = []
 
 		for img in images:
 			src = img.attrib.get('src')
-
-			if src is not None and src.lower().endswith('.png'):
+			if src and src.lower().endswith('.png'):
 				png_images.append(src)
 
 		if len(png_images) >= 3:
-			def correct_url(url):
-				if url.startswith('//'):
-					return 'https:' + url
-				elif url.startswith('/'):
-					return 'http://sdvx.in' + url
-				elif url.startswith('http://') or url.startswith('https://'):
-					return url
-				else:
-					return self.path + url
-
 			self.url['bg'] = correct_url(png_images[0])
 			self.url['data'] = correct_url(png_images[1])
 			self.url['bar'] = correct_url(png_images[2])
+			return
+
+		raise ValueError('譜面画像のurlを取得できません')
 
 	def setSource(self):
-		try:
-			print "webdriverを起動中"
-			print "重たい処理なので応答なしになる場合があります"
-			driver = webdriver.PhantomJS(service_log_path=os.path.devnull)
-			print "webページを取得中"
-			driver.get(self.url['url'])
-			self.source = driver.page_source
-		finally:
-			driver.close()
-	
+		print("webページを取得中")
+
+		request = urllib.request.Request(
+			self.url['url'],
+			headers={
+				'User-Agent': 'Mozilla/5.0'
+			}
+		)
+
+		with urllib.request.urlopen(request) as response:
+			self.source = response.read()
+
 	def getSource(self):
 		if 'source' not in dir(self):
 			self.setSource()
@@ -237,26 +211,26 @@ class Score:
 						url = self.url['bg'][:-6] + 'gbg.png'
 					elif key == 'bar':
 						url = self.url['bar'][:-7] + 'gbar.png'
-					imgdata = urllib2.urlopen(url).read()
-					self.img[key] = Image.open(StringIO(imgdata))
+					imgdata = urllib.request.urlopen(url).read()
+					self.img[key] = Image.open(BytesIO(imgdata))
 					self.url[key] = url
 				except HTTPError:
 					url = self.url[key]
-					imgdata = urllib2.urlopen(url).read()
-					self.img[key] = Image.open(StringIO(imgdata))
+					imgdata = urllib.request.urlopen(url).read()
+					self.img[key] = Image.open(BytesIO(imgdata))
 			else:#レーンが消える背景はgbg.png
 				try:
 					url = self.url[key]
-					imgdata = urllib2.urlopen(url).read()
-					self.img[key] = Image.open(StringIO(imgdata))
+					imgdata = urllib.request.urlopen(url).read()
+					self.img[key] = Image.open(BytesIO(imgdata))
 				except HTTPError:
 					if key == 'bg':
 						self.url['bg'] = self.url['bg'][:-6] + 'gbg.png'
 					else:
 						raise HTTPError(str(key)+'のurlが不正です')
 					url = self.url[key]
-					imgdata = urllib2.urlopen(url).read()
-					self.img[key] = Image.open(StringIO(imgdata))
+					imgdata = urllib.request.urlopen(url).read()
+					self.img[key] = Image.open(BytesIO(imgdata))
 		return self.img[key]
 
 	def setYoutubeUrl(self):
@@ -276,11 +250,11 @@ class Score:
 			best = video.getbestaudio()
 			nonwave_filename = filename + '.' + best.extension
 			wave_filename = filename + '.wav'
-			print 'youtubeから' + best.title + 'をダウンロードしています'
+			print('youtubeから' + best.title + 'をダウンロードしています')
 			best.download(nonwave_filename)
-			print nonwave_filename + "の保存に成功しました"
+			print(nonwave_filename + "の保存に成功しました")
 			sound = AudioSegment.from_file(nonwave_filename)
-			print best.title + 'のwavファイルを生成しています'
+			print(best.title + 'のwavファイルを生成しています')
 			sound.export(wave_filename, format='wav')
 
 		if 'fx' not in self.url or 'nofx' not in self.url:
@@ -305,7 +279,7 @@ class Score:
 				sample = bg[:,i+8,0]
 			except IndexError:
 				break
-			if ~np.any(sample):
+			if not np.any(sample):
 				break
 			x.append(i)
 			Y.append(np.where(sample == 204)[0])
@@ -318,6 +292,7 @@ class Score:
 
 		data = self.getArray('data')
 		x, Y = self.subscripts
+
 		for i, y in enumerate(Y):
 			if j < len(y) - 1:
 				return data[y[-2-j]:y[-1-j],x[i]:x[i]+55]
@@ -381,30 +356,33 @@ def isBTlong(arr):
 #	return 0.835*arr[:,:,0] + 1.015*arr[:,:,1] + arr[:,:,2] > 483.48
 
 def parseBT(arr, mode):
+	mode = int(mode)
 	if arr.shape[0] % mode == 0:
 		d = arr.shape[0]/mode
 	else:
 		raise Exception('画像を'+str(mode)+'分割できません')
-	sample = arr[:,(12,22,32,42)][::-1][1::d]
+	sample = arr[:,(12,22,32,42)][::-1][1::int(d)]
 	s = isBTshort(sample)
 	l = isBTlong(sample) & ~s
-	return (2*l+s).astype('|S1')
+	return (2*l+s).astype('U1')
+
 def isFXshort(sample):
 	#yellow_s = ((255,148,27,255),(225,148,27,255))
 	return sample[:,:,3] == 255
+
 #def isFXlong(sample):
 #	yellow_l = (
 #		(255,159,7,107),#黄
 #
 #		(252,102,106,166),#黄の上に赤
 #		(251,88,133,189),
-#		(252,93,124,182),
-#		(251,96,116,174),
+#		(252,93,124,174),
+#		(251,96,116,170),
 #		(251,98,110,170),
 #		(254,138,42,122),
 #		(253,110,95,151),
 #		(251,93,120,178),
-#		(254,124,69,135),
+#		(251,124,69,135),
 #
 #		(140,125,153,166),#黄の上に青
 #		(115,123,187,189),
@@ -431,33 +409,34 @@ def isFXlong(arr):
 	       ~np.all(arr == [0,0,0,0],axis=2)
 
 def parseFX(arr, mode):
+	mode = int(mode)
 	if arr.shape[0] % mode == 0:
 		d = arr.shape[0]/mode
 	else:
 		raise Exception('画像を'+str(mode)+'分割できません')
 
-	sample = arr[:,(17,37)][::-1][1::d]
+	sample = arr[:,(17,37)][::-1][1::int(d)]
 	s = isFXshort(sample)
 	l = isFXlong(sample) & ~s
-	return (2*s+l).astype('|S1')
+	return (2*s+l).astype('U1')
 	
 def parseVOL(arr, mode):
-	return np.array([['-','-']]*mode)
+	return np.array([['-','-']]*int(mode))
 
 def parseMeasure(arr, mode):
 	bt  = parseBT(arr, mode)
 	fx  = parseFX(arr, mode)
 	vol = parseVOL(arr, mode)
-	v   = np.array(['|']*mode)
+	v   = np.array(['|']*int(mode))
 	return toStr(np.c_[bt,v,fx,v,vol])
 
 def parseScore(score):
 	h = '\r\n--\r\n'
-	score = h.join([parseMeasure(k, k.shape[0]/2) for k in score])
+	score = h.join([parseMeasure(k, int(k.shape[0]/2)) for k in score])
 	return h + score + h
 
 def adjustWave(fx_filename, nofx_filename):
-	print "fx,nofx音源の位置合わせをしています"
+	print("fx,nofx音源の位置合わせをしています")
 	fps, fx = wf.read(fx_filename)
 	fps2, nofx = wf.read(nofx_filename)
 
@@ -465,8 +444,8 @@ def adjustWave(fx_filename, nofx_filename):
 	fx_t = 20, 100
 	nofx_t = fx_t[0] + d,  fx_t[1] - d
 	if fps != fps2:
-		print 'fx音源とnofx音源のサンプリングレートが異なります'
-		print 'Audacityなどで音ズレを直して下さい'
+		print('fx音源とnofx音源のサンプリングレートが異なります')
+		print('Audacityなどで音ズレを直して下さい')
 
 	else:
 		fxf = fx.astype('float32')
@@ -476,51 +455,53 @@ def adjustWave(fx_filename, nofx_filename):
 		templ = nofxf[ fps*nofx_t[0] : fps*nofx_t[1] ]
 		res = cv2.matchTemplate(imag, templ, cv2.TM_SQDIFF)
 		error = np.argmin(res) - d*fps
-		print str(error) + "フレームの音ズレを検出しました"
+		print(str(error) + "フレームの音ズレを検出しました")
 		if error == 0:
 			pass
 		elif error > 0:
 			wf.write(fx_filename, fps, fx[error:])
 		else:
 			wf.write(nofx_filename, fps, nofx[-error:])
+
+
 if __name__ == '__main__':
-	if len(sys.argv) < 2:
-		print '使い方:'
-		print 'python sdvx2ksh.py <sdvx.inの譜面URL>'
-		print ''
-		print '例:'
-		print 'python sdvx2ksh.py https://sdvx.in/05/05004m.htm'
+	if len(sys.argv) != 2:
+		print('使い方:')
+		print('python sdvx2ksh.py https://sdvx.in/05/05004m.htm')
 		sys.exit(1)
 
 	url = sys.argv[1]
 
 	try:
-		print '譜面を取得しています...'
+		print('譜面を取得しています...')
 		score = Score(url)
 
-		print '譜面情報を取得しています...'
+		print('ページを読み込んでいます...')
+		score.getSource()
+
+		print('譜面情報を取得しています...')
 		score.setHeader()
 
-		print '譜面画像を取得しています...'
+		print('譜面画像を探しています...')
 		score.setCorrectUrl()
 
-		print '譜面を解析しています...'
+		print('譜面画像を解析しています...')
 		body = parseScore(score)
 
 		filename = score.id + score._d + '.ksh'
 
-		print 'KSHファイルを書き込んでいます...'
+		print('KSHファイルを書き込んでいます...')
 
 		with codecs.open(filename, 'w', 'utf-8') as f:
 			f.write(score.getHeader())
 			f.write(body)
 
-		print ''
-		print '完了しました!'
-		print '出力ファイル: ' + filename
+		print('')
+		print('完了しました!')
+		print('出力ファイル: ' + filename)
 
 	except Exception as e:
-		print ''
-		print 'エラーが発生しました:'
-		print str(e)
+		print('')
+		print('エラーが発生しました:')
+		print(str(e))
 		sys.exit(1)
