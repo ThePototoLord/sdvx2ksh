@@ -72,17 +72,58 @@ class Score:
 		self.arr = {}
 		self.url = {}
 		self.header = {}
-		self.version = url[19:21]
-		self.id = url.split('/')[4]
-		self._d = url[-5]
+
+		# https://sdvx.in/05/05004m.htm
+		# http://sdvx.in/05/05004m.htm
+		#
+		# /05/05004m.htm
+		#   version = 05
+		#   id = 05004
+		#   difficulty = m
+		#
+		# Also support the old format:
+		# /03/03044/03044e.htm
+
+		m = re.match(
+			r'^https?://(?:www\.)?sdvx\.in/(\d+)/(\d+)([naeigm])\.htm(?:\?.*)?$',
+			url,
+			re.I
+		)
+
+		if m:
+			self.version = m.group(1)
+			self.id = m.group(2)
+			self._d = m.group(3).lower()
+			self.path = '/'.join(url.split('/')[:4]) + '/'
+		else:
+			m = re.match(
+				r'^https?://(?:www\.)?sdvx\.in/(\d+)/(\d+)/(\d+)([naeigm])\.htm(?:\?.*)?$',
+				url,
+				re.I
+			)
+
+			if not m:
+				raise ValueError('sdvx.inのurlが不正です: ' + url)
+
+			self.version = m.group(1)
+			self.id = m.group(3)
+			self._d = m.group(4).lower()
+			self.path = '/'.join(url.split('/')[:4]) + '/'
+
 		self.difficulty = {'n':'NOVICE',   'a':'ADVANCED', 'e':'EXHAUST',
-		              'i':'INFINITE', 'g':'GRAVITY'}[self._d]
-		self.path = '/'.join(url.split('/')[:4]) + '/'
+		              'i':'INFINITE', 'g':'GRAVITY', 'm':'MAXIMUM'}[self._d]
 		self.url['url']    = url
-		self.url['bg']     = self.path + self.id + '/' + self.id + 'bg.png'
-		self.url['bar']    = self.path + self.id + '/' + self.id + 'bar.png'
-		self.url['jacket'] = self.path + self.id + '/' + self.id + self._d + '.jpg'
-		self.url['data']   = self.path + 'obj/data' + self.id + self._d + '.png'
+
+		if self.path.endswith('/' + self.id + '/'):
+			self.url['bg']     = self.path + self.id + 'bg.png'
+			self.url['bar']    = self.path + self.id + 'bar.png'
+			self.url['jacket'] = self.path + self.id + self._d + '.jpg'
+			self.url['data']   = self.path + 'obj/data' + self.id + self._d + '.png'
+		else:
+			self.url['bg']     = self.path + self.id + '/' + self.id + 'bg.png'
+			self.url['bar']    = self.path + self.id + '/' + self.id + 'bar.png'
+			self.url['jacket'] = self.path + self.id + '/' + self.id + self._d + '.jpg'
+			self.url['data']   = self.path + 'obj/data' + self.id + self._d + '.png'
 
 	def setHeader(self):
 #		def ancestor(self,i):
@@ -109,7 +150,7 @@ class Score:
 		bpm = elements_div[-5].text
 		self.header['t'] = '' if '-' in bpm else bpm
 		self.header['difficulty'] = {'n':'light', 'a':'challenge', 'e':'extended',
-		                             'i':'infinite', 'g':'infinite'}[self._d]
+		                             'i':'infinite', 'g':'infinite', 'm':'maximum'}[self._d]
 		self.header['jacket'] = 'jacket_%s.jpg' % self._d
 		self.header['m'] = 'no' + ((';fx_%s.wav' % self._d)*4)[1:]
 
@@ -121,13 +162,54 @@ class Score:
 	def setCorrectUrl(self):
 		source = self.getSource()
 		root = lxml.html.fromstring(source)
-		bg, data, bar = [
-			'http://sdvx.in'+e.xpath('img')[0].attrib['src']
-			for e in root.xpath('//p[@class="PNG"]')
-		]
-		self.url['bg'] = bg
-		self.url['bata'] = data
-		self.url['bar'] = bar
+
+		png = root.xpath('//p[@class="PNG"]')
+
+		if len(png) >= 3:
+			bg, data, bar = [
+				e.xpath('img')[0].attrib['src']
+				for e in png[:3]
+			]
+
+			def correct_url(url):
+				if url.startswith('//'):
+					return 'https:' + url
+				elif url.startswith('/'):
+					return 'http://sdvx.in' + url
+				elif url.startswith('http://') or url.startswith('https://'):
+					return url
+				else:
+					return self.path + url
+
+			self.url['bg'] = correct_url(bg)
+			self.url['data'] = correct_url(data)
+			self.url['bar'] = correct_url(bar)
+			return
+
+		images = root.xpath('//img')
+
+		png_images = []
+
+		for img in images:
+			src = img.attrib.get('src')
+
+			if src is not None and src.lower().endswith('.png'):
+				png_images.append(src)
+
+		if len(png_images) >= 3:
+			def correct_url(url):
+				if url.startswith('//'):
+					return 'https:' + url
+				elif url.startswith('/'):
+					return 'http://sdvx.in' + url
+				elif url.startswith('http://') or url.startswith('https://'):
+					return url
+				else:
+					return self.path + url
+
+			self.url['bg'] = correct_url(png_images[0])
+			self.url['data'] = correct_url(png_images[1])
+			self.url['bar'] = correct_url(png_images[2])
 
 	def setSource(self):
 		try:
@@ -236,7 +318,6 @@ class Score:
 
 		data = self.getArray('data')
 		x, Y = self.subscripts
-
 		for i, y in enumerate(Y):
 			if j < len(y) - 1:
 				return data[y[-2-j]:y[-1-j],x[i]:x[i]+55]
@@ -254,7 +335,6 @@ class Score:
 			bg   = self.getArray('bg').astype('float')
 			data = self.getArray('data').astype('float')
 			bar  = self.getArray('bar')
-
 			tmp = (bg[:,:,:3]*bg[:,:,(3,3,3)]+data[:,:,:3]*data[:,:,(3,3,3)])/255
 			mask = tmp > 256
 
@@ -309,11 +389,9 @@ def parseBT(arr, mode):
 	s = isBTshort(sample)
 	l = isBTlong(sample) & ~s
 	return (2*l+s).astype('|S1')
-
 def isFXshort(sample):
 	#yellow_s = ((255,148,27,255),(225,148,27,255))
 	return sample[:,:,3] == 255
-
 #def isFXlong(sample):
 #	yellow_l = (
 #		(255,159,7,107),#黄
@@ -405,4 +483,3 @@ def adjustWave(fx_filename, nofx_filename):
 			wf.write(fx_filename, fps, fx[error:])
 		else:
 			wf.write(nofx_filename, fps, nofx[-error:])
-
