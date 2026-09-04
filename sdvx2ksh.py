@@ -2,6 +2,7 @@
 # coding:utf-8
 import sys
 import urllib.request
+import urllib.parse
 from urllib.error import HTTPError
 import numpy as np
 import lxml.html
