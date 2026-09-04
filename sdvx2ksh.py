@@ -483,3 +483,44 @@ def adjustWave(fx_filename, nofx_filename):
 			wf.write(fx_filename, fps, fx[error:])
 		else:
 			wf.write(nofx_filename, fps, nofx[-error:])
+if __name__ == '__main__':
+	if len(sys.argv) < 2:
+		print '使い方:'
+		print 'python sdvx2ksh.py <sdvx.inの譜面URL>'
+		print ''
+		print '例:'
+		print 'python sdvx2ksh.py https://sdvx.in/05/05004m.htm'
+		sys.exit(1)
+
+	url = sys.argv[1]
+
+	try:
+		print '譜面を取得しています...'
+		score = Score(url)
+
+		print '譜面情報を取得しています...'
+		score.setHeader()
+
+		print '譜面画像を取得しています...'
+		score.setCorrectUrl()
+
+		print '譜面を解析しています...'
+		body = parseScore(score)
+
+		filename = score.id + score._d + '.ksh'
+
+		print 'KSHファイルを書き込んでいます...'
+
+		with codecs.open(filename, 'w', 'utf-8') as f:
+			f.write(score.getHeader())
+			f.write(body)
+
+		print ''
+		print '完了しました!'
+		print '出力ファイル: ' + filename
+
+	except Exception as e:
+		print ''
+		print 'エラーが発生しました:'
+		print str(e)
+		sys.exit(1)
