@@ -335,6 +335,15 @@ class Score:
 				return url
 
 			return urllib.parse.urljoin(self.url['url'], url)
+		### NEW:
+		# デバッグ用:
+		# 実際にどの画像URLを使用しているか表示する。
+		print('')
+		print('検出した譜面画像URL:')
+		print('  bg   = ' + self.url['bg'])
+		print('  data = ' + self.url['data'])
+		print('  bar  = ' + self.url['bar'])
+		print('')
 
 		### NEW:
 		# sdvx.inの譜面ページには、譜面確認用のPNG画像が
@@ -592,100 +601,82 @@ class Score:
 		if key not in self.img:
 
 			### NEW:
-			# 画像URLの実体を取得する共通処理。
-			# User-AgentとRefererを付けないと、環境によっては
-			# 画像サーバー側から拒否されることがある。
+			# 画像をダウンロードする共通処理。
+			# sdvx.in側の画像URLはページによって異なるため、
+			# URLを試すたびにUser-AgentとRefererを付ける。
 			def download_image(url):
-				try:
-					request = urllib.request.Request(
-						url,
-						headers={
-							'User-Agent': (
-								'Mozilla/5.0 '
-								'(Windows NT 10.0; Win64; x64) '
-								'AppleWebKit/537.36 '
-								'(KHTML, like Gecko) '
-								'Chrome/131.0 Safari/537.36'
-							),
-							'Referer': self.url['url'],
-						}
-					)
+				request = urllib.request.Request(
+					url,
+					headers={
+						'User-Agent': (
+							'Mozilla/5.0 '
+							'(Windows NT 10.0; Win64; x64) '
+							'AppleWebKit/537.36 '
+							'(KHTML, like Gecko) '
+							'Chrome/131.0 Safari/537.36'
+						),
+						'Referer': self.url['url'],
+					}
+				)
 
+				try:
 					with urllib.request.urlopen(
 						request,
 						timeout=30
 					) as response:
 						imgdata = response.read()
 
-					image = Image.open(
+					return Image.open(
 						BytesIO(imgdata)
 					).convert('RGBA')
 
-					return image
-
 				except HTTPError as e:
 					raise RuntimeError(
-						key + '画像を取得できませんでした: '
-						+ url +
+						key + '画像を取得できませんでした: ' +
+						url +
 						' (HTTP ' + str(e.code) + ')'
-					)
-
-				except URLError as e:
-					raise RuntimeError(
-						key + '画像を取得できませんでした: '
-						+ url +
-						' (' + str(e.reason) + ')'
 					)
 
 				except Exception as e:
 					raise RuntimeError(
-						key + '画像を読み込めませんでした: '
-						+ url +
+						key + '画像を読み込めませんでした: ' +
+						url +
 						' (' + str(e) + ')'
 					)
 
-			if self._d == 'g':
-				try:#grv譜面は使いまわしされない画像かもしれない
-					url = self.url[key]
+			### NEW:
+			# まずsetCorrectUrl()で見つけたURLをそのまま試す。
+			#
+			# 重要:
+			# ここではbg.pngをgbg.pngへ勝手に変更しない。
+			# 現在のsdvx.inではgbg.pngが存在しない譜面もある。
+			url = self.url[key]
 
-					if key == 'bg':
-						url = self.url['bg'][:-6] + 'gbg.png'
+			try:
+				self.img[key] = download_image(url)
+				return self.img[key]
 
-					elif key == 'bar':
-						url = self.url['bar'][:-7] + 'gbar.png'
+			except RuntimeError as original_error:
 
-					self.img[key] = download_image(url)
-					self.url[key] = url
+				### NEW:
+				# 元コードでは「bgが404ならgbg.png」を試していた。
+				#
+				# これは古いsdvx.inの命名規則を前提としているため、
+				# 現在のページでは逆に404を発生させる原因になる。
+				#
+				# そのため、gbg.pngへの変換は廃止する。
+				#
+				# Gravity譜面についても同様に、HTMLから取得した
+				# URLを最優先する。
 
-				except Exception:
-					# 元のURLを試す。
-					url = self.url[key]
-					self.img[key] = download_image(url)
-
-			else:#レーンが消える背景はgbg.png
-				try:
-					url = self.url[key]
-					self.img[key] = download_image(url)
-
-				except RuntimeError:
-					if key == 'bg':
-						### NEW:
-						# lane-off背景の場合のみgbg.pngを試す。
-						fallback = self.url['bg']
-
-						if fallback.endswith('bg.png'):
-							fallback = fallback[:-6] + 'gbg.png'
-						else:
-							raise
-
-						self.img[key] = download_image(fallback)
-						self.url[key] = fallback
-
-					else:
-						raise
+				raise original_error
+		print('譜面画像を解析しています...')
+		print('bg URL   : ' + score.url['bg'])
+		print('data URL : ' + score.url['data'])
+		print('bar URL  : ' + score.url['bar'])
+		body = parseScore(score)
 
 		return self.img[key]
-
 
 	def setYoutubeUrl(self):
 		source = self.getSource()
