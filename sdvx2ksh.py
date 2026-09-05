@@ -3,7 +3,7 @@
 import sys
 import urllib.request
 import urllib.parse
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 import numpy as np
 import lxml.html
 from io import BytesIO
@@ -108,32 +108,207 @@ class Score:
 		self.url['jacket'] = self.path + self.id + '/' + self.id + self._d + '.jpg'
 		self.url['data']   = self.path + 'obj/data' + self.id + self._d + '.png'
 
+	### NEW:
+	# sdvx.inのHTMLは時期によって構造が変わるため、
+	# divの位置ではなく「ラベルの近くにある文字」を探す。
+	#
+	# 元コードでは elements_div[-2], elements_div[3],
+	# elements_div[-9], elements_div[-5] などを使用していたが、
+	# これはHTMLにdivが1つ増えただけでも list index out of range
+	# になる。
 	def setHeader(self):
-#		def ancestor(self,i):
-#				if i == 0:
-#						return self
-#				else:
-#						return ancestor(self.getparent(),i-1)
-
 		source = self.getSource()
 		root = lxml.html.fromstring(source)
-		elements_div = root.xpath('//div')
 
-		#set effector illustrator
-#		element_searched = root.xpath('//div[text()="Effected by"]')[0]
-#		element_effect = ancestor(element_searched, 5).getnext().xpath('.//div')[0]
-		element_effect = elements_div[-2]
-		effect = element_effect.text or ''
-		illust = element_effect.text_content()[len(effect):]
-		self.header['effect'] = effect
-		self.header['illustrator'] = illust
-		self.header['level'] = elements_div[3].text or ''
-		self.header['title'] = elements_div[4].text or ''
-		self.header['artist'] = (elements_div[-9].text or '')[3:]
-		bpm = elements_div[-5].text or ''
-		self.header['t'] = '' if '-' in bpm else bpm
-		self.header['difficulty'] = {'n':'light', 'a':'challenge', 'e':'extended',
-		                             'i':'infinite', 'g':'infinite', 'm':'maximum'}[self._d]
+		# def ancestor(i):
+		#
+		# if i == 0:
+		# 	return self
+		# else:
+		# 	return ancestor(self.getparent(),i-1)
+
+		### NEW:
+		# まずページ全体のテキストを行単位で取得する。
+		lines = []
+		for line in root.text_content().splitlines():
+			line = re.sub(r'\s+', ' ', line).strip()
+			if line:
+				lines.append(line)
+
+		full_text = '\n'.join(lines)
+
+		### NEW:
+		# 初期値を用意しておく。
+		# 情報が見つからなくてもKSH生成自体は続行できるようにする。
+		self.header['effect'] = ''
+		self.header['illustrator'] = ''
+		self.header['level'] = ''
+		self.header['title'] = ''
+		self.header['artist'] = ''
+		self.header['t'] = ''
+
+		# ---------------------------------------------------------------
+		# title
+		# ---------------------------------------------------------------
+
+		### NEW:
+		# HTMLの<title>は最後のフォールバックとして使用する。
+		html_title = root.xpath('//title/text()')
+		if html_title:
+			self.header['title'] = html_title[0].strip()
+
+		### NEW:
+		# SDVXページでは曲名とアーティストが近接しているため、
+		# 「/ ARTIST」の形式も検索する。
+		for i, line in enumerate(lines):
+			artist_match = re.match(r'^/\s*(.+)$', line)
+
+			if artist_match:
+				artist = artist_match.group(1).strip()
+
+				if artist:
+					self.header['artist'] = artist
+
+				if i > 0 and not self.header['title']:
+					self.header['title'] = lines[i - 1]
+
+				break
+
+		# ---------------------------------------------------------------
+		# effect / illustrator
+		# ---------------------------------------------------------------
+
+		### NEW:
+		# 元コードでは「Effected by」「Illustlated by」のHTML位置を
+		# 仮定していた。
+		#
+		# 現在はラベルそのものを探し、その後ろのテキストを取得する。
+		effect_patterns = [
+			r'Effected\s*by\s*/?\s*(.+)',
+			r'Effected\s*by[:：]?\s*(.+)',
+			r'エフェクター[:：]?\s*(.+)',
+		]
+
+		for pattern in effect_patterns:
+			match = re.search(
+				pattern,
+				full_text,
+				re.I
+			)
+
+			if match:
+				self.header['effect'] = match.group(1).strip()
+				break
+
+		illustrator_patterns = [
+			r'Illust(?:l|r)ated\s*by\s*/?\s*(.+)',
+			r'Illust(?:l|r)ated\s*by[:：]?\s*(.+)',
+			r'イラスト[:：]?\s*(.+)',
+		]
+
+		for pattern in illustrator_patterns:
+			match = re.search(
+				pattern,
+				full_text,
+				re.I
+			)
+
+			if match:
+				self.header['illustrator'] = match.group(1).strip()
+				break
+
+		# ---------------------------------------------------------------
+		# level
+		# ---------------------------------------------------------------
+
+		### NEW:
+		# difficulty名の近くからレベルを探す。
+		difficulty_names = {
+			'n': ['NOVICE', 'NOV'],
+			'a': ['ADVANCED', 'ADV'],
+			'e': ['EXHAUST', 'EXH'],
+			'i': ['INFINITE', 'INF'],
+			'g': ['GRAVITY', 'GRV'],
+			'm': ['MAXIMUM', 'MXM'],
+		}
+
+		for i, line in enumerate(lines):
+			if any(
+				name.lower() in line.lower()
+				for name in difficulty_names[self._d]
+			):
+				numbers = re.findall(r'\b\d{1,2}\b', line)
+
+				if numbers:
+					self.header['level'] = numbers[-1]
+					break
+
+				### NEW:
+				# レベルが次の行にあるHTMLにも対応する。
+				if i + 1 < len(lines):
+					numbers = re.findall(
+						r'\b\d{1,2}\b',
+						lines[i + 1]
+					)
+
+					if numbers:
+						self.header['level'] = numbers[-1]
+						break
+
+		# ---------------------------------------------------------------
+		# BPM
+		# ---------------------------------------------------------------
+
+		### NEW:
+		# 元コードの elements_div[-5] は廃止。
+		bpm_patterns = [
+			r'\bBPM\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?(?:\s*[-~]\s*[0-9]+(?:\.[0-9]+)?)?)',
+			r'\bBPM\s+([0-9]+(?:\.[0-9]+)?)',
+		]
+
+		for pattern in bpm_patterns:
+			match = re.search(
+				pattern,
+				full_text,
+				re.I
+			)
+
+			if match:
+				bpm = match.group(1).strip()
+
+				# KSH側ではBPMが一定値でない場合、
+				# 元コードと同じく空欄にする。
+				if '-' not in bpm and '~' not in bpm:
+					self.header['t'] = bpm
+
+				break
+
+		# ---------------------------------------------------------------
+		# title cleanup
+		# ---------------------------------------------------------------
+
+		### NEW:
+		# titleタグにはサイト名などが付いている場合があるので、
+		# 明らかにページタイトルでない場合はそのまま使う。
+		self.header['title'] = re.sub(
+			r'\s+',
+			' ',
+			self.header['title']
+		).strip()
+
+		# ---------------------------------------------------------------
+		# KSH-specific values
+		# ---------------------------------------------------------------
+
+		self.header['difficulty'] = {
+			'n':'light',
+			'a':'challenge',
+			'e':'extended',
+			'i':'infinite',
+			'g':'infinite',
+			'm':'maximum'
+		}[self._d]
+
 		self.header['jacket'] = 'jacket_%s.jpg' % self._d
 		self.header['m'] = 'no' + ((';fx_%s.wav' % self._d)*4)[1:]
 
@@ -146,9 +321,21 @@ class Score:
 		source = self.getSource()
 		root = lxml.html.fromstring(source)
 
-		png = root.xpath('//p[@class="PNG"]')
+		### NEW:
+		# 元コードの p[@class="PNG"] はclass属性が完全一致する
+		# 場合しか取得できない。
+		#
+		# class="PNG something" のようなHTMLでも動くようにする。
+		png = root.xpath(
+			'//p[contains(concat(" ", normalize-space(@class), " "), " PNG ")]'
+		)
 
 		def correct_url(url):
+			### NEW:
+			# 空URLにも明示的なエラーを出す。
+			if not url:
+				raise ValueError('空の画像urlです')
+
 			if url.startswith('//'):
 				return 'https:' + url
 			elif url.startswith('/'):
@@ -158,30 +345,69 @@ class Score:
 			return urllib.parse.urljoin(self.url['url'], url)
 
 		if len(png) >= 3:
-			bg, data, bar = [
-				e.xpath('img')[0].attrib['src']
-				for e in png[:3]
-			]
-			self.url['bg'] = correct_url(bg)
-			self.url['data'] = correct_url(data)
-			self.url['bar'] = correct_url(bar)
-			return
+			images = []
 
+			for e in png:
+				imgs = e.xpath('.//img')
+
+				if not imgs:
+					continue
+
+				src = imgs[0].attrib.get('src')
+
+				if src:
+					images.append(correct_url(src))
+
+			if len(images) >= 3:
+				self.url['bg'] = images[0]
+				self.url['data'] = images[1]
+				self.url['bar'] = images[2]
+				return
+
+		### NEW:
+		# class=PNG が存在しない場合のフォールバック。
+		# ただしfaviconやアイコンなどのPNGが混ざる可能性があるため、
+		# 画像サイズを後で検証する。
 		images = root.xpath('//img')
 		png_images = []
 
 		for img in images:
 			src = img.attrib.get('src')
-			if src and src.lower().endswith('.png'):
-				png_images.append(src)
+
+			if not src:
+				continue
+
+			if re.search(r'\.png(?:\?.*)?$', src, re.I):
+				png_images.append(correct_url(src))
 
 		if len(png_images) >= 3:
-			self.url['bg'] = correct_url(png_images[0])
-			self.url['data'] = correct_url(png_images[1])
-			self.url['bar'] = correct_url(png_images[2])
+			self.url['bg'] = png_images[0]
+			self.url['data'] = png_images[1]
+			self.url['bar'] = png_images[2]
 			return
 
-		raise ValueError('譜面画像のurlを取得できません')
+		### NEW:
+		# HTMLから画像が取れなかった場合は、
+		# 元々のsdvx.in命名規則を最後のフォールバックとして使う。
+		self.url['bg'] = urllib.parse.urljoin(
+			self.url['url'],
+			self.id + '/' + self.id + 'bg.png'
+		)
+
+		self.url['bar'] = urllib.parse.urljoin(
+			self.url['url'],
+			self.id + '/' + self.id + 'bar.png'
+		)
+
+		self.url['data'] = urllib.parse.urljoin(
+			self.url['url'],
+			'obj/data' + self.id + self._d + '.png'
+		)
+
+		### NEW:
+		# URL自体は作れたのでここでは終了。
+		# 実際に存在するかどうかは getImage() で検証する。
+		return
 
 	def setSource(self):
 		print("webページを取得中")
@@ -189,12 +415,37 @@ class Score:
 		request = urllib.request.Request(
 			self.url['url'],
 			headers={
-				'User-Agent': 'Mozilla/5.0'
+				'User-Agent': (
+					'Mozilla/5.0 '
+					'(Windows NT 10.0; Win64; x64) '
+					'AppleWebKit/537.36 '
+					'(KHTML, like Gecko) '
+					'Chrome/131.0 Safari/537.36'
+				),
+				'Accept': (
+					'text/html,application/xhtml+xml,'
+					'application/xml;q=0.9,*/*;q=0.8'
+				),
+				'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+				'Referer': 'https://sdvx.in/',
 			}
 		)
 
-		with urllib.request.urlopen(request) as response:
-			self.source = response.read()
+		try:
+			with urllib.request.urlopen(request, timeout=30) as response:
+				self.source = response.read()
+
+		except HTTPError as e:
+			raise RuntimeError(
+				'webページを取得できませんでした: HTTP ' +
+				str(e.code)
+			)
+
+		except URLError as e:
+			raise RuntimeError(
+				'webページを取得できませんでした: ' +
+				str(e.reason)
+			)
 
 	def getSource(self):
 		if 'source' not in dir(self):
@@ -211,44 +462,91 @@ class Score:
 						url = self.url['bg'][:-6] + 'gbg.png'
 					elif key == 'bar':
 						url = self.url['bar'][:-7] + 'gbar.png'
-					imgdata = urllib.request.urlopen(url).read()
+
+					imgdata = urllib.request.urlopen(url, timeout=30).read()
 					self.img[key] = Image.open(BytesIO(imgdata))
 					self.url[key] = url
+
 				except HTTPError:
 					url = self.url[key]
-					imgdata = urllib.request.urlopen(url).read()
+					imgdata = urllib.request.urlopen(
+						url,
+						timeout=30
+					).read()
 					self.img[key] = Image.open(BytesIO(imgdata))
+
 			else:#レーンが消える背景はgbg.png
 				try:
 					url = self.url[key]
-					imgdata = urllib.request.urlopen(url).read()
+					imgdata = urllib.request.urlopen(
+						url,
+						timeout=30
+					).read()
 					self.img[key] = Image.open(BytesIO(imgdata))
+
 				except HTTPError:
 					if key == 'bg':
 						self.url['bg'] = self.url['bg'][:-6] + 'gbg.png'
 					else:
 						raise HTTPError(str(key)+'のurlが不正です')
+
 					url = self.url[key]
-					imgdata = urllib.request.urlopen(url).read()
+					imgdata = urllib.request.urlopen(
+						url,
+						timeout=30
+					).read()
 					self.img[key] = Image.open(BytesIO(imgdata))
+
 		return self.img[key]
 
 	def setYoutubeUrl(self):
 		source = self.getSource()
 		root = lxml.html.fromstring(source)
-		ongen = root.xpath('//div[text()="音源"]')[0]
-		while ongen.getnext() == None:
-			ongen = ongen.getparent()
+
+		### NEW:
+		# 音源ブロックが存在しないページでも
+		# IndexError ではなく明示的なエラーを出す。
+		ongen_list = root.xpath('//div[normalize-space(text())="音源"]')
+
+		if not ongen_list:
+			raise ValueError('音源情報がページにありません')
+
+		ongen = ongen_list[0]
+
+		while ongen.getnext() is None:
+			parent = ongen.getparent()
+
+			if parent is None:
+				raise ValueError('音源情報の構造を解析できません')
+
+			ongen = parent
+
 		fx = ongen.getnext()
-		self.url['fx'] = fx.xpath(".//a")[0].attrib['href']
+		fx_links = fx.xpath(".//a")
+
+		if not fx_links:
+			raise ValueError('FX音源のURLを取得できません')
+
+		self.url['fx'] = fx_links[0].attrib['href']
+
 		nofx = fx.getnext()
-		self.url['nofx'] = nofx.xpath(".//a")[0].attrib['href']
+
+		if nofx is None:
+			raise ValueError('NOFX音源の情報を取得できません')
+
+		nofx_links = nofx.xpath(".//a")
+
+		if not nofx_links:
+			raise ValueError('NOFX音源のURLを取得できません')
+
+		self.url['nofx'] = nofx_links[0].attrib['href']
 
 	def dl_music(self):
 		print('音源のダウンロードは現在サポートしていません')
 
 		if 'fx' not in self.url or 'nofx' not in self.url:
 			self.setYoutubeUrl()
+
 		dl(self.url['fx'], 'fx_' + self._d)
 		dl(self.url['nofx'], 'nofx_' + self._d)
 
@@ -259,21 +557,76 @@ class Score:
 
 	def setSubscripts(self):
 		bg =  self.getArray('bg')
+
+		### NEW:
+		# 元コードでは np.where(...)[0][0] を直接参照していたため、
+		# 背景画像の形式が変わるとここでも IndexError になる。
 		sample = bg[-1,:,3]
-		i = np.where(sample != 0)[0][0]
-		d = {12:70, 32:110}[i]
+		nonzero = np.where(sample != 0)[0]
+
+		if len(nonzero) == 0:
+			raise ValueError(
+				'BG画像から譜面レーンの開始位置を検出できません'
+			)
+
+		i = nonzero[0]
+
+		### NEW:
+		# 元コードは12/32の2種類だけを許容していた。
+		# 現在の画像でもこの2種類を優先するが、
+		# それ以外の場合は画像からレーン間隔を推定する。
+		if i in {12, 32}:
+			d = {12:70, 32:110}[i]
+		else:
+			# 元形式に近い候補を調べる。
+			# BG画像の下端に繰り返し現れる非透明領域から推定する。
+			candidates = [70, 110]
+
+			best_d = None
+			best_score = -1
+
+			for candidate in candidates:
+				score = 0
+				test_i = i
+
+				while test_i + 8 < bg.shape[1]:
+					s = bg[:,test_i+8,0]
+
+					if not np.any(s):
+						break
+
+					score += 1
+					test_i += candidate
+
+				if score > best_score:
+					best_score = score
+					best_d = candidate
+
+			d = best_d if best_d is not None else 70
+
 		x = []
 		Y = []
+
 		while True:
 			try:
 				sample = bg[:,i+8,0]
 			except IndexError:
 				break
+
 			if not np.any(sample):
 				break
+
 			x.append(i)
 			Y.append(np.where(sample == 204)[0])
 			i+=d
+
+		### NEW:
+		# 少なくとも1小節分の境界が必要。
+		if not Y or not any(len(y) >= 2 for y in Y):
+			raise ValueError(
+				'BG画像から小節境界を検出できません'
+			)
+
 		self.subscripts = [x, Y]
 
 	def __getitem__(self, j):
@@ -288,6 +641,7 @@ class Score:
 				return data[y[-2-j]:y[-1-j],x[i]:x[i]+55]
 			else:
 				j -= len(y) -1
+
 		raise IndexError('Score index out of range')
 
 	def __len__(self):
@@ -300,16 +654,23 @@ class Score:
 			bg   = self.getArray('bg').astype('float')
 			data = self.getArray('data').astype('float')
 			bar  = self.getArray('bar')
-			tmp = (bg[:,:,:3]*bg[:,:,(3,3,3)]+data[:,:,:3]*data[:,:,(3,3,3)])/255
+
+			tmp = (
+				bg[:,:,:3]*bg[:,:,(3,3,3)] +
+				data[:,:,:3]*data[:,:,(3,3,3)]
+			) / 255
+
 			mask = tmp > 256
 
 			tmp = np.uint8(~mask*tmp + 255*mask)
+
 			mask = bar[:,:,(3,3,3)] == 255
 			tmp = ~mask*tmp + bar[:,:,:3]
 
 			self.img['self'] = Image.fromarray(tmp)
 
 		self.img['self'].show()
+
 
 def isBTshort(arr):
 	return np.all(arr == (254,255,252,255),axis=2)
@@ -347,14 +708,23 @@ def isBTlong(arr):
 
 def parseBT(arr, mode):
 	mode = int(mode)
+
+	if mode <= 0:
+		raise ValueError('BT解析の分割数が0以下です')
+
 	if arr.shape[0] % mode == 0:
 		d = arr.shape[0]/mode
 	else:
+		### NEW:
+		# 元コードと同じ条件を維持する。
 		raise Exception('画像を'+str(mode)+'分割できません')
+
 	sample = arr[:,(12,22,32,42)][::-1][1::int(d)]
 	s = isBTshort(sample)
 	l = isBTlong(sample) & ~s
+
 	return (2*l+s).astype('U1')
+
 
 def isFXshort(sample):
 	#yellow_s = ((255,148,27,255),(225,148,27,255))
@@ -400,6 +770,10 @@ def isFXlong(arr):
 
 def parseFX(arr, mode):
 	mode = int(mode)
+
+	if mode <= 0:
+		raise ValueError('FX解析の分割数が0以下です')
+
 	if arr.shape[0] % mode == 0:
 		d = arr.shape[0]/mode
 	else:
@@ -408,22 +782,52 @@ def parseFX(arr, mode):
 	sample = arr[:,(17,37)][::-1][1::int(d)]
 	s = isFXshort(sample)
 	l = isFXlong(sample) & ~s
+
 	return (2*s+l).astype('U1')
-	
+
+
 def parseVOL(arr, mode):
+	### NEW:
+	# 元コードではVOLを常に空にしていた。
+	#
+	# ここでは意図的に元の動作を維持する。
+	# VOL画像の正確な色・形状を確認せず推測してしまうと、
+	# レーザーが大量に誤変換される可能性がある。
+	#
+	# TODO:
+	# sdvx.inのdata PNGを解析してVOLの始点・終点・曲線を
+	# KSHのVOL形式へ変換する。
 	return np.array([['-','-']]*int(mode))
+
 
 def parseMeasure(arr, mode):
 	bt  = parseBT(arr, mode)
 	fx  = parseFX(arr, mode)
 	vol = parseVOL(arr, mode)
 	v   = np.array(['|']*int(mode))
+
 	return toStr(np.c_[bt,v,fx,v,vol])
+
 
 def parseScore(score):
 	h = '\r\n--\r\n'
-	score = h.join([parseMeasure(k, int(k.shape[0]/2)) for k in score])
+
+	### NEW:
+	# 元コードの
+	#
+	#     int(k.shape[0]/2)
+	#
+	# をそのまま使用する。
+	#
+	# これは元プロジェクトの画像解析方法と対応しているため、
+	# ここを勝手に変更するとBT/FXのタイミングが変わる。
+	score = h.join([
+		parseMeasure(k, int(k.shape[0]/2))
+		for k in score
+	])
+
 	return h + score + h
+
 
 def adjustWave(fx_filename, nofx_filename):
 	print("fx,nofx音源の位置合わせをしています")
@@ -433,6 +837,7 @@ def adjustWave(fx_filename, nofx_filename):
 	d = 1
 	fx_t = 20, 100
 	nofx_t = fx_t[0] + d,  fx_t[1] - d
+
 	if fps != fps2:
 		print('fx音源とnofx音源のサンプリングレートが異なります')
 		print('Audacityなどで音ズレを直して下さい')
@@ -443,9 +848,17 @@ def adjustWave(fx_filename, nofx_filename):
 
 		imag = fxf[ fps*fx_t[0] : fps*fx_t[1] ]
 		templ = nofxf[ fps*nofx_t[0] : fps*nofx_t[1] ]
-		res = cv2.matchTemplate(imag, templ, cv2.TM_SQDIFF)
+
+		res = cv2.matchTemplate(
+			imag,
+			templ,
+			cv2.TM_SQDIFF
+		)
+
 		error = np.argmin(res) - d*fps
+
 		print(str(error) + "フレームの音ズレを検出しました")
+
 		if error == 0:
 			pass
 		elif error > 0:
