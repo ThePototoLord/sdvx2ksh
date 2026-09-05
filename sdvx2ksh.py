@@ -321,13 +321,148 @@ class Score:
 		source = self.getSource()
 		root = lxml.html.fromstring(source)
 
+		def correct_url(url):
+			if not url:
+				return None
+
+			url = url.strip()
+
+			if url.startswith('//'):
+				return 'https:' + url
+			elif url.startswith('/'):
+				return 'https://sdvx.in' + url
+			elif url.startswith('http://') or url.startswith('https://'):
+				return url
+
+			return urllib.parse.urljoin(self.url['url'], url)
+
 		### NEW:
-		# 元コードの p[@class="PNG"] はclass属性が完全一致する
-		# 場合しか取得できない。
+		# sdvx.inの譜面ページには、譜面確認用のPNG画像が
+		# 複数の <p class="PNG"> ブロックとして配置されている。
 		#
-		# class="PNG something" のようなHTMLでも動くようにする。
+		# 元コード:
+		#
+		#     png = root.xpath('//p[@class="PNG"]')
+		#
+		# ではclass属性が完全一致する必要がある。
+		#
+		# 現在のHTMLではclass属性に別のclassが追加される可能性が
+		# あるため、class名としてPNGを含むものを検索する。
 		png = root.xpath(
 			'//p[contains(concat(" ", normalize-space(@class), " "), " PNG ")]'
+		)
+
+		candidates = []
+
+		for e in png:
+			imgs = e.xpath('.//img')
+
+			for img in imgs:
+				src = img.attrib.get('src')
+
+				if not src:
+					continue
+
+				url = correct_url(src)
+
+				if url and url not in candidates:
+					candidates.append(url)
+
+		### NEW:
+		# まず、HTMLに明示されたPNGだけを使う。
+		#
+		# 「ページ内の最初の3枚のPNG」を使うとfaviconや
+		# その他の画像を誤って譜面画像として扱う可能性がある。
+		if len(candidates) >= 3:
+
+			# 元プロジェクトの期待する順番:
+			#
+			# bg -> data -> bar
+			#
+			# を維持する。
+			self.url['bg'] = candidates[0]
+			self.url['data'] = candidates[1]
+			self.url['bar'] = candidates[2]
+
+			return
+
+		### NEW:
+		# PNGクラスが取得できない場合のフォールバック。
+		#
+		# ただし、ここでも「最初の3枚」を無条件に使わず、
+		# 画像の実体をHEAD/GETしてサイズを確認する。
+		images = root.xpath('//img')
+
+		png_images = []
+
+		for img in images:
+			src = img.attrib.get('src')
+
+			if not src:
+				continue
+
+			if not re.search(r'\.png(?:\?.*)?$', src, re.I):
+				continue
+
+			url = correct_url(src)
+
+			if url and url not in png_images:
+				png_images.append(url)
+
+		### NEW:
+		# 実際に画像として読み込めるPNGだけを残す。
+		valid_images = []
+
+		for url in png_images:
+			try:
+				request = urllib.request.Request(
+					url,
+					headers={
+						'User-Agent': 'Mozilla/5.0',
+						'Referer': self.url['url'],
+					}
+				)
+
+				with urllib.request.urlopen(
+					request,
+					timeout=15
+				) as response:
+					data = response.read()
+
+				image = Image.open(BytesIO(data))
+
+				# 小さいアイコン等を除外する。
+				if image.width >= 50 and image.height >= 50:
+					valid_images.append(url)
+
+			except Exception:
+				continue
+
+		if len(valid_images) >= 3:
+			self.url['bg'] = valid_images[0]
+			self.url['data'] = valid_images[1]
+			self.url['bar'] = valid_images[2]
+			return
+
+		### NEW:
+		# 最後に、元リポジトリの命名規則を試す。
+		#
+		# これは古いページ用のフォールバック。
+		# ここでURLを設定するだけにして、実際の404は
+		# getImage()側で分かりやすく報告する。
+		self.url['bg'] = urllib.parse.urljoin(
+			self.url['url'],
+			self.id + '/' + self.id + 'bg.png'
+		)
+
+		self.url['bar'] = urllib.parse.urljoin(
+			self.url['url'],
+			self.id + '/' + self.id + 'bar.png'
+		)
+
+		self.url['data'] = urllib.parse.urljoin(
+			self.url['url'],
+			'obj/data' + self.id + self._d + '.png'
 		)
 
 		def correct_url(url):
@@ -455,49 +590,102 @@ class Score:
 #TODO レーン消え、アレンジ、等でbg,barの命名規則がカオス。殺す。
 	def getImage(self, key):
 		if key not in self.img:
+
+			### NEW:
+			# 画像URLの実体を取得する共通処理。
+			# User-AgentとRefererを付けないと、環境によっては
+			# 画像サーバー側から拒否されることがある。
+			def download_image(url):
+				try:
+					request = urllib.request.Request(
+						url,
+						headers={
+							'User-Agent': (
+								'Mozilla/5.0 '
+								'(Windows NT 10.0; Win64; x64) '
+								'AppleWebKit/537.36 '
+								'(KHTML, like Gecko) '
+								'Chrome/131.0 Safari/537.36'
+							),
+							'Referer': self.url['url'],
+						}
+					)
+
+					with urllib.request.urlopen(
+						request,
+						timeout=30
+					) as response:
+						imgdata = response.read()
+
+					image = Image.open(
+						BytesIO(imgdata)
+					).convert('RGBA')
+
+					return image
+
+				except HTTPError as e:
+					raise RuntimeError(
+						key + '画像を取得できませんでした: '
+						+ url +
+						' (HTTP ' + str(e.code) + ')'
+					)
+
+				except URLError as e:
+					raise RuntimeError(
+						key + '画像を取得できませんでした: '
+						+ url +
+						' (' + str(e.reason) + ')'
+					)
+
+				except Exception as e:
+					raise RuntimeError(
+						key + '画像を読み込めませんでした: '
+						+ url +
+						' (' + str(e) + ')'
+					)
+
 			if self._d == 'g':
 				try:#grv譜面は使いまわしされない画像かもしれない
 					url = self.url[key]
+
 					if key == 'bg':
 						url = self.url['bg'][:-6] + 'gbg.png'
+
 					elif key == 'bar':
 						url = self.url['bar'][:-7] + 'gbar.png'
 
-					imgdata = urllib.request.urlopen(url, timeout=30).read()
-					self.img[key] = Image.open(BytesIO(imgdata))
+					self.img[key] = download_image(url)
 					self.url[key] = url
 
-				except HTTPError:
+				except Exception:
+					# 元のURLを試す。
 					url = self.url[key]
-					imgdata = urllib.request.urlopen(
-						url,
-						timeout=30
-					).read()
-					self.img[key] = Image.open(BytesIO(imgdata))
+					self.img[key] = download_image(url)
 
 			else:#レーンが消える背景はgbg.png
 				try:
 					url = self.url[key]
-					imgdata = urllib.request.urlopen(
-						url,
-						timeout=30
-					).read()
-					self.img[key] = Image.open(BytesIO(imgdata))
+					self.img[key] = download_image(url)
 
-				except HTTPError:
+				except RuntimeError:
 					if key == 'bg':
-						self.url['bg'] = self.url['bg'][:-6] + 'gbg.png'
-					else:
-						raise HTTPError(str(key)+'のurlが不正です')
+						### NEW:
+						# lane-off背景の場合のみgbg.pngを試す。
+						fallback = self.url['bg']
 
-					url = self.url[key]
-					imgdata = urllib.request.urlopen(
-						url,
-						timeout=30
-					).read()
-					self.img[key] = Image.open(BytesIO(imgdata))
+						if fallback.endswith('bg.png'):
+							fallback = fallback[:-6] + 'gbg.png'
+						else:
+							raise
+
+						self.img[key] = download_image(fallback)
+						self.url[key] = fallback
+
+					else:
+						raise
 
 		return self.img[key]
+
 
 	def setYoutubeUrl(self):
 		source = self.getSource()
